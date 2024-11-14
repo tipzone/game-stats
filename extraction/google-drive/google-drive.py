@@ -1,99 +1,230 @@
 import io
-import os.path
-
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+import json
+import logging
+import os
+import pandas as pd
+import psycopg2
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-# If modifying these scopes, delete the file token.json.
+# Set up logging with both console and file output
+logging.basicConfig(
+    level=logging.INFO,  # Set level to INFO for general messages
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Print to console
+        logging.FileHandler("app.log")  # Log to a file
+    ]
+)
+
+# PostgreSQL connection
+conn = psycopg2.connect(
+  host="172.23.224.1",
+  port=5432,
+  dbname="game_stats",
+  user="postgres",
+  password="Tullicious@p"
+)
+
+# Path to the service account credentials JSON file
+SERVICE_ACCOUNT_FILE = '/app/credentials.json'
+
+# Scopes for Google Drive API
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
+
+def insert_games(data, conn):
+    """Insert JSON data into a PostgreSQL table for 'games'."""
+    # Convert JSON data to a DataFrame
+    df = pd.json_normalize(data['games']).astype(str)
+    
+    # Write DataFrame to PostgreSQL
+    with conn.cursor() as cursor:
+        # Truncate table before loading
+        cursor.execute("TRUNCATE TABLE landing_zone.games")
+        # Insert new data
+        for _, row in df.iterrows():
+            cursor.execute(
+                """
+                INSERT INTO landing_zone.games (
+                    uuid, id, name, modificationdate, cooperative, highestWins, noPoints, usesTeams,
+                    urlThumb, urlImage, bggName, bggYear, bggId, designers, isBaseGame, isExpansion, rating, minPlayerCount,
+                    maxPlayerCount, minPlayTime, maxPlayTime, minAge, preferredImage, previouslyPlayedAmount, load_date
+                ) 
+                VALUES (%(uuid)s, %(id)s, %(name)s, %(modificationDate)s, %(cooperative)s, %(highestWins)s, %(noPoints)s, 
+                    %(usesTeams)s, %(urlThumb)s, %(urlImage)s, %(bggName)s, %(bggYear)s, %(bggId)s, %(designers)s, 
+                    %(isBaseGame)s, %(isExpansion)s, %(rating)s, %(minPlayerCount)s, %(maxPlayerCount)s, %(minPlayTime)s, 
+                    %(maxPlayTime)s, %(minAge)s, %(preferredImage)s, %(previouslyPlayedAmount)s, CURRENT_TIMESTAMP)
+                """,
+                row.to_dict()  # Pass each row as a dictionary
+            )
+        conn.commit()
+
+def insert_players(data, conn):
+    """Insert JSON data into a PostgreSQL table for 'players'."""
+    # Convert JSON data to a DataFrame
+    df = pd.json_normalize(data['players']).astype(str)
+    
+    # Write DataFrame to PostgreSQL
+    with conn.cursor() as cursor:
+        # Truncate table before loading
+        cursor.execute("TRUNCATE TABLE landing_zone.players")
+        # Insert new data
+        for _, row in df.iterrows():
+            cursor.execute(
+                """
+                INSERT INTO landing_zone.players (uuid, id, name, isAnonymous, modificationDate, bggUsername, load_date) 
+                VALUES (%(uuid)s, %(id)s, %(name)s, %(isAnonymous)s, %(modificationDate)s, %(bggUsername)s, CURRENT_TIMESTAMP)
+                """,
+                row.to_dict()  # Pass each row as a dictionary
+            )
+        conn.commit()
+
+
+def insert_locations(data, conn):
+    """Insert JSON data into a PostgreSQL table."""
+    # Convert JSON data to a DataFrame (if it's structured)
+    df = pd.json_normalize(data['locations'])
+    
+    # Write DataFrame to PostgreSQL
+    with conn.cursor() as cursor:
+        # Truncate table before loading
+        cursor.execute("TRUNCATE TABLE landing_zone.locations")
+        # Insert new data
+        for _, row in df.iterrows():
+            cursor.execute(
+                """
+                INSERT INTO landing_zone.locations (uuid, id, name, modificationDate, load_date) 
+                VALUES (%(uuid)s, %(id)s, %(name)s, %(modificationDate)s, CURRENT_TIMESTAMP)
+                """,
+                row.to_dict()
+            )
+        conn.commit()
+
+def insert_plays(data, conn):
+    """Insert JSON data into a PostgreSQL table."""
+    # Convert JSON data to a DataFrame (if it's structured)
+    df_plays = pd.json_normalize(data['plays']).astype(str)
+
+    # Player scores are nested within the plays json, so we need to prepare player scores as separate data
+    player_scores_data = []
+    for play in data['plays']:
+        play_uuid = play.get("uuid")
+        for player_score in play.get("playerScores", []):
+            player_score['play_uuid'] = play_uuid  # Add play UUID for relational link
+            player_scores_data.append(player_score)
+
+    # Convert 'playerScores' to DataFrame
+    df_player_scores = pd.DataFrame(player_scores_data).astype(str)
+    
+    # Write DataFrame to PostgreSQL
+    with conn.cursor() as cursor:
+        # Insert into plays table
+        cursor.execute("TRUNCATE TABLE landing_zone.plays")
+        for _, row in df_plays.iterrows():
+            cursor.execute(
+                """
+                INSERT INTO landing_zone.plays (uuid, modificationDate, entryDate, playDate, usesTeams, durationMin,
+                    ignored, manualWinner, rounds, bggId, importPlayId, locationRefId, gameRefId, rating, nemestatsId,
+                    load_date) 
+                VALUES (%(uuid)s, %(modificationDate)s, %(entryDate)s, %(playDate)s, %(usesTeams)s, %(durationMin)s,
+                    %(ignored)s, %(manualWinner)s, %(rounds)s, %(bggId)s, %(importPlayId)s, %(locationRefId)s,
+                    %(gameRefId)s, %(rating)s, %(nemestatsId)s, CURRENT_TIMESTAMP)
+                """,
+                row.to_dict()  # Convert row to a dictionary and pass it as arguments
+            )
+
+        # Insert into player_scores table
+        cursor.execute("TRUNCATE TABLE landing_zone.player_scores")
+        for _, row in df_player_scores.iterrows():
+            cursor.execute(
+                """
+                INSERT INTO landing_zone.player_scores (play_uuid, score, winner, newPlayer, startPlayer, playerRefId, 
+                    rank, seatOrder, load_date) 
+                VALUES (%(play_uuid)s, %(score)s, %(winner)s, %(newPlayer)s, %(startPlayer)s, %(playerRefId)s,
+                    %(rank)s, %(seatOrder)s, CURRENT_TIMESTAMP)
+                """,
+                row.to_dict()
+            )
+
+        conn.commit()
+
+
 def main():
-  """Shows basic usage of the Drive v3 API.
-  Prints the names and ids of the first 10 files the user has access to.
-  """
-  creds = None
-  # The file token.json stores the user's access and refresh tokens, and is
-  # created automatically when the authorization flow completes for the first
-  # time.
-  if os.path.exists("token.json"):
-    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-  # If there are no (valid) credentials available, let the user log in.
-  if not creds or not creds.valid:
-    if creds and creds.expired and creds.refresh_token:
-      creds.refresh(Request())
-    else:
-      flow = InstalledAppFlow.from_client_secrets_file(
-          "credentials.json", SCOPES
-      )
-      creds = flow.run_local_server(port=0)
-    # Save the credentials for the next run
-    with open("token.json", "w") as token:
-      token.write(creds.to_json())
+    """Authenticates using the service account and downloads a file from Google Drive."""
+    creds = None
+    # Use the service account credentials to authenticate
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 
-  try:
-    # Create Google Drive service object
-    service = build("drive", "v3", credentials=creds)
+    try:
+        # Create Google Drive service object
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    # Call the Drive v3 API
-    results = (
-        # RESOURCE OBJECTs are logical groups containing methods within the API.
-        # e.g. if the API is Wal-Mart, this is the one section like tech or toys
-        service.files() # This is the files RESOURCE OBJECT
-        
-        # Call methods within RESOURCE OBJECT
-        # A method within a RESOURCE OBJECT returns a REQUEST OBJECT (a configured request ready to go but not yet sent)
-        # You can only use one method when creating a request object.
-        .list(
+        # Call the Drive v3 API to list files
+        results = service.files().list(
             q="name contains 'BGStatsExport' and fileExtension = 'json' and '1-HRwkuGUS1j1ZWBcgCb0e3wdTSwrJkxd' in parents",
             fields="nextPageToken, files(id, name, parents, fileExtension, createdTime)",
             pageSize=5
-            )
+        ).execute()
 
-        # Send the REQUEST OBJECT to the API
-        .execute()
-    )
+        items = results.get("files", [])
+        sorted_items = sorted(items, key=lambda x: x['createdTime'], reverse=True)
+        first_item = sorted_items[0]
 
-    items = results.get("files", [])
-    sorted_items = sorted(items, key=lambda x: x['createdTime'], reverse=True, )
-    first_item = sorted_items[0]
+        if not first_item:
+            logging.warning("No first file found.")
+            return
+    except Exception as error:
+        logging.error(f"An error occurred: {error}")
 
-    if not first_item:
-      print("No first file found.")
-      return
-  except HttpError as error:
-    # TODO(developer) - Handle errors from drive API.
-    print(f"An error occurred: {error}")
+    # Download file
+    try:
+        request = service.files().get_media(fileId=first_item['id'])
+        file = io.BytesIO()
+        downloader = MediaIoBaseDownload(file, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            logging.info(f"Download {int(status.progress() * 100)}%.")
+        file.seek(0)
+        
+        # Read JSON data directly from the file object
+        data = json.load(file)
+        
+        # Insert JSON data into PostgreSQL
+        try:
+            insert_games(data, conn)
+        except Exception as error:
+            logging.error(f"An error occurred when inserting GAME data: {error}")
+            conn.rollback()
 
-  # Download file
-  try:
-    first_item_id = first_item['id']
-    first_item_name = first_item['name']
-    
-    # create drive api client
-    request = service.files().get_media(fileId=first_item_id)
-    file = io.BytesIO() # Create BytesIO object to hold downloaded content in memory.
-    downloader = MediaIoBaseDownload(file, request)
-    done = False
-    while done is False:
-      status, done = downloader.next_chunk()
-      print(f"Download {int(status.progress() * 100)}.")
+        try:
+            insert_players(data, conn)
+        except Exception as error:
+            logging.error(f"An error occurred when inserting PLAYER data: {error}")
+            conn.rollback()
 
-    # Write the file to disk
-    file.seek(0)  # Move to the beginning of the BytesIO buffer
-    with open(first_item_name, "wb") as f:  # Open the file in write-binary mode
-      f.write(file.read())  # Write the content to a file
-      print(f"Downloaded {first_item_name}.")
+        try:
+            insert_locations(data, conn)
+        except Exception as error:
+            logging.error(f"An error occurred when inserting LOCATION data: {error}")
+            conn.rollback()
 
-  except HttpError as error:
-    print(f"An error occurred: {error}")
-    file = None
-
+        try:
+            insert_plays(data, conn)
+        except Exception as error:
+            logging.error(f"An error occurred when inserting PLAY data: {error}")
+            conn.rollback()
+        
+        conn.close()
+        logging.info(f"Inserted data from {first_item['name']} into PostgreSQL.")
+        
+    except Exception as error:
+        logging.error(f"An error occurred: {error}")
 
 
 if __name__ == "__main__":
-  main()
+    main()
