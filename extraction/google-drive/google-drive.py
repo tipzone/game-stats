@@ -4,6 +4,7 @@ import logging
 import os
 import pandas as pd
 import psycopg2
+from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -19,14 +20,26 @@ logging.basicConfig(
     ]
 )
 
-# PostgreSQL connection
+# Load environment variables from .env file
+load_dotenv()
+
+# Retrieve PostgreSQL credentials
+db_password = os.getenv("POSTGRES_PASSWORD")
+db_user = os.getenv("POSTGRES_USER")
+db_name = os.getenv("POSTGRES_DB")
+db_host = os.getenv("POSTGRES_HOST")
+db_port = os.getenv("POSTGRES_PORT")
+
+# Use the credentials in your connection
+import psycopg2
 conn = psycopg2.connect(
-  host="172.23.224.1",
-  port=5432,
-  dbname="game_stats",
-  user="postgres",
-  password="Tullicious@p"
+    host=db_host,
+    port=db_port,
+    dbname=db_name,
+    user=db_user,
+    password=db_password
 )
+
 
 # Path to the service account credentials JSON file
 SERVICE_ACCOUNT_FILE = '/app/credentials.json'

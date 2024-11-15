@@ -1,4 +1,5 @@
-credentials.json
-token.json
-test.py
+.env
 *.log
+credentials.json
+test.py
+token.json
